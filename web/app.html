@@ -1,0 +1,1403 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Редактор PDF</title>
+<script src="lib/pdf.min.js"></script>
+<script src="lib/pdf-lib.min.js"></script>
+<script src="lib/fontkit.umd.min.js"></script>
+<script id="pdf-worker" type="text/plain" data-src="lib/pdf.worker.min.js"></script>
+<script id="font-data" type="text/plain" data-src="lib/LiberationSans-subset.ttf"></script>
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f5f6f8; --border: #dcdfe4; --text: #1f2328;
+    --muted: #6a737d; --accent: #2f6feb; --canvas: #a3a8b0; --sel: #dbe7ff;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16181d; --panel: #1f2229; --border: #343842; --text: #e6e8eb;
+    --muted: #9aa1ab; --accent: #6ea8fe; --canvas: #0d0f12; --sel: #23324d;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header { background: var(--panel); border-bottom: 1px solid var(--border); }
+  .bar { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; padding: 4px 8px; }
+  .bar + .bar { border-top: 1px solid var(--border); }
+  .sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+  .name { flex: 1 1 100px; min-width: 0; text-align: right; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  button {
+    background: transparent; color: var(--text); border: 1px solid transparent; border-radius: 6px;
+    padding: 3px 9px; font: inherit; cursor: pointer; min-width: 30px;
+  }
+  button:hover:not(:disabled) { border-color: var(--border); background: var(--bg); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.active { border-color: var(--accent); color: var(--accent); background: var(--bg); }
+  label.inline { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+  input, select {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 5px; padding: 2px 5px;
+  }
+  input[type=number] { width: 70px; }
+  input[type=color] { width: 32px; height: 26px; padding: 1px; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #thumbs {
+    width: 180px; flex: none; overflow-y: auto; padding: 8px; background: var(--panel);
+    border-right: 1px solid var(--border); user-select: none;
+  }
+  .thumb {
+    position: relative; padding: 6px; margin-bottom: 4px; border-radius: 6px; text-align: center;
+    border: 2px solid transparent; cursor: pointer;
+  }
+  .thumb canvas { width: 120px; background: #fff; box-shadow: 0 0 0 1px var(--border); display: block; margin: 0 auto; }
+  .thumb span { display: block; font-size: 12px; color: var(--muted); }
+  .thumb.sel { background: var(--sel); }
+  .thumb.cur { border-color: var(--accent); }
+  .thumb.drop-before::before, .thumb.drop-after::after {
+    content: ""; position: absolute; left: 4px; right: 4px; height: 3px; background: var(--accent); border-radius: 2px;
+  }
+  .thumb.drop-before::before { top: -4px; }
+  .thumb.drop-after::after { bottom: -4px; }
+  #viewer { flex: 1; overflow: auto; background: var(--canvas); position: relative; }
+  #wrap { position: relative; margin: 20px auto; box-shadow: 0 2px 12px rgba(0,0,0,.35); background: #fff; }
+  #wrap canvas { position: absolute; left: 0; top: 0; }
+  #overlay { touch-action: none; }
+  #wrap.t-text #overlay { cursor: text; }
+  #wrap.t-edit #overlay { cursor: pointer; }
+  #wrap.t-erase #overlay, #wrap.t-highlight #overlay, #wrap.t-box #overlay,
+  #wrap.t-ink #overlay, #wrap.t-image #overlay { cursor: crosshair; }
+  .textbox {
+    position: absolute; z-index: 2; min-width: 120px; min-height: 1.3em; padding: 0; margin: 0;
+    border: 0; outline: 1px dashed var(--accent); background: rgba(255,255,255,.6); resize: both;
+    font-family: "PdfFont", "Liberation Sans", Arial, sans-serif; line-height: 1.2; overflow: hidden;
+  }
+  #start {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    text-align: center; color: var(--text); background: var(--bg);
+  }
+  #start .box { max-width: 520px; padding: 36px; border: 2px dashed var(--border); border-radius: 14px; }
+  #start h2 { margin-top: 0; }
+  #start p { color: var(--muted); }
+  footer {
+    display: flex; gap: 16px; padding: 3px 12px; font-size: 12px; color: var(--muted);
+    background: var(--panel); border-top: 1px solid var(--border);
+  }
+  footer #msg { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  footer .dirty { color: #d29922; }
+  .drop { outline: 3px dashed var(--accent); outline-offset: -8px; }
+  #busy {
+    position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.25); cursor: wait;
+  }
+  #busy div { background: var(--bg); padding: 14px 22px; border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,.3); }
+  body.busy #busy { display: flex; }
+  dialog {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text);
+    padding: 18px 20px; min-width: 340px; max-width: 92vw;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  dialog h3 { margin: 0 0 12px; }
+  dialog .row { margin: 8px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  dialog .row > span:first-child { min-width: 110px; color: var(--muted); }
+  dialog input[type=text] { flex: 1; min-width: 180px; }
+  dialog .menu { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  dialog .menu button { border-color: var(--border); padding: 4px 14px; }
+  dialog .menu button[value=ok] { background: var(--accent); color: #fff; border-color: var(--accent); }
+  dialog .note { color: var(--muted); font-size: 12px; }
+  @media (max-width: 700px) {
+    #thumbs { width: 110px; padding: 4px; }
+    .thumb canvas { width: 80px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <button id="bOpen" title="Открыть PDF или картинку (Ctrl+O)">Открыть</button>
+    <button id="bSave" title="Сохранить (Ctrl+S)">Сохранить</button>
+    <button id="bSaveAs" title="Сохранить как (Ctrl+Shift+S)">Сохранить как</button>
+    <button id="bUndo" title="Отменить (Ctrl+Z)">↶</button>
+    <button id="bRedo" title="Повторить (Ctrl+Y)">↷</button>
+    <span class="sep"></span>
+    <button id="bInsert" title="Добавить страницы из другого PDF или картинки (Ctrl+I)">Вставить PDF / картинку</button>
+    <button id="bBlank" title="Пустая страница после текущей">Пустая стр.</button>
+    <button id="bSplit" title="Разделить на несколько файлов">Разделить</button>
+    <button id="bExtract" title="Сохранить выделенные страницы в новый PDF">Извлечь</button>
+    <button id="bExport" title="Сохранить страницы как изображения (Ctrl+E)">В JPG / PNG</button>
+    <span class="sep"></span>
+    <button id="bRotL" title="Повернуть влево">⟲</button>
+    <button id="bRotR" title="Повернуть вправо">⟳</button>
+    <button id="bUp" title="Переместить выше">▲</button>
+    <button id="bDown" title="Переместить ниже">▼</button>
+    <button id="bDelete" title="Удалить выделенные страницы (Del)">Удалить стр.</button>
+    <span class="sep"></span>
+    <button id="bPrev" title="Предыдущая страница (PgUp)">◀</button>
+    <button id="bNext" title="Следующая страница (PgDn)">▶</button>
+    <button id="bZoomOut" title="Уменьшить (Ctrl −)">−</button>
+    <button id="bZoomIn" title="Увеличить (Ctrl +)">+</button>
+    <button id="bFit" title="По ширине (Ctrl+0)">По ширине</button>
+    <button id="bTheme" title="Светлая / тёмная тема">◐</button>
+    <span class="name" id="name"></span>
+  </div>
+  <div class="bar" id="tools">
+    <button data-tool="pointer" class="active" title="Обычный просмотр">Указатель</button>
+    <button data-tool="text" title="Щёлкните на странице и введите текст; Ctrl+Enter — готово, Esc — отмена">Текст</button>
+    <button data-tool="edit" title="Щёлкните по строке, чтобы заменить её текст">Править текст</button>
+    <button data-tool="erase" title="Выделите область — она будет закрашена белым">Стереть</button>
+    <button data-tool="highlight" title="Выделите область для подсветки">Маркер</button>
+    <button data-tool="box" title="Выделите область, чтобы нарисовать рамку">Рамка</button>
+    <button data-tool="ink" title="Рисование от руки, подпись">Карандаш</button>
+    <button data-tool="image" title="Выделите область, куда вставить картинку">Картинка</button>
+    <span class="sep"></span>
+    <label class="inline" title="Цвет текста и рисования">Цвет <input type="color" id="color" value="#000000"></label>
+    <label class="inline">Шрифт <input type="number" id="fontSize" min="4" max="200" value="12"></label>
+    <label class="inline">Линия <input type="number" id="lineWidth" min="0.5" max="20" step="0.5" value="2"></label>
+  </div>
+</header>
+<main>
+  <aside id="thumbs"></aside>
+  <section id="viewer">
+    <div id="wrap" hidden><canvas id="page"></canvas><canvas id="overlay"></canvas></div>
+    <div id="start">
+      <div class="box">
+        <h2>Редактор PDF</h2>
+        <p>Перетащите сюда PDF или картинки, или</p>
+        <button id="bStart" class="active">Открыть файл</button>
+        <p>Можно править текст, удалять, поворачивать и переставлять страницы,
+          вставлять другие PDF и картинки, разделять документ и сохранять страницы в JPG / PNG.
+          Файлы никуда не отправляются — всё работает прямо в браузере.</p>
+      </div>
+    </div>
+  </section>
+</main>
+<footer>
+  <span id="msg"></span>
+  <span id="pageInfo"></span>
+  <span id="zoomInfo"></span>
+</footer>
+<div id="busy"><div id="busyText">Обработка…</div></div>
+<dialog id="dlg">
+  <form method="dialog">
+    <h3 id="dlgTitle"></h3>
+    <div id="dlgBody"></div>
+    <div class="menu">
+      <button value="ok" id="dlgOk">OK</button>
+      <button value="cancel" formnovalidate>Отмена</button>
+    </div>
+  </form>
+</dialog>
+<script>
+"use strict";
+const { PDFDocument, rgb, degrees, LineCapStyle, BlendMode } = PDFLib;
+const $ = (s) => document.querySelector(s);
+const THUMB_W = 120;
+const UNDO_LIMIT = 30;
+const PDF_TYPES = [{ description: "PDF", accept: { "application/pdf": [".pdf"] } }];
+const OPEN_ACCEPT = ".pdf,application/pdf,image/*";
+const IMG_RE = /\.(jpe?g|png|gif|bmp|webp|tiff?|avif)$/i;
+
+// pdf.js воркер и шрифт встроены в страницу при сборке (build.py)
+(() => {
+  const el = $("#pdf-worker");
+  const src = el.textContent.trim();
+  pdfjsLib.GlobalWorkerOptions.workerSrc = src
+    ? URL.createObjectURL(new Blob([src], { type: "text/javascript" }))
+    : el.dataset.src;
+})();
+
+let fontBytesPromise = null;
+function fontBytes() {
+  if (!fontBytesPromise) {
+    const el = $("#font-data");
+    const b64 = el.textContent.trim();
+    fontBytesPromise = b64
+      ? Promise.resolve(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)))
+      : fetch(el.dataset.src).then((r) => r.arrayBuffer()).then((b) => new Uint8Array(b));
+    // тот же шрифт для поля ввода текста — что видно, то и попадёт в PDF
+    fontBytesPromise.then((b) => new FontFace("PdfFont", b).load())
+      .then((f) => document.fonts.add(f)).catch(() => {});
+  }
+  return fontBytesPromise;
+}
+fontBytes();
+
+async function embedFont(doc) {
+  doc.registerFontkit(fontkit);
+  return doc.embedFont(await fontBytes(), { subset: false });
+}
+
+const S = {
+  bytes: null,        // текущий PDF (Uint8Array)
+  pdf: null,          // документ pdf.js для отрисовки
+  name: "",
+  handle: null,       // файл на диске (Chrome/Edge) — «Сохранить» пишет прямо в него
+  modified: false,
+  readOnly: false,
+  password: undefined,
+  undo: [], redo: [],
+  cur: 0,
+  sel: new Set(),
+  anchor: 0,
+  zoom: 1, fit: true,
+  vp: null, rotation: 0,
+  tool: "pointer",
+  renderToken: 0,
+  dragPages: null,
+};
+
+const thumbsEl = $("#thumbs"), viewer = $("#viewer"), wrap = $("#wrap");
+const pageCanvas = $("#page"), overlay = $("#overlay");
+
+// ---------- служебное ----------
+
+let msgTimer;
+function status(text, ms = 4000) {
+  $("#msg").textContent = text;
+  clearTimeout(msgTimer);
+  if (ms) msgTimer = setTimeout(() => ($("#msg").textContent = ""), ms);
+}
+
+function setBusy(on, text = "Обработка…") {
+  document.body.classList.toggle("busy", on);
+  $("#busyText").textContent = text;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+const stem = () => (S.name || "документ.pdf").replace(/\.[^.]+$/, "");
+const count = () => (S.pdf ? S.pdf.numPages : 0);
+const norm = (a) => ((a % 360) + 360) % 360;
+const hexRgb = (h) => rgb(parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255);
+const color = () => $("#color").value;
+const fontSize = () => Math.max(4, Math.min(200, +$("#fontSize").value || 12));
+const lineWidth = () => Math.max(0.5, Math.min(20, +$("#lineWidth").value || 2));
+
+function dialog(title, html, okText = "OK") {
+  const dlg = $("#dlg");
+  $("#dlgTitle").textContent = title;
+  $("#dlgBody").innerHTML = html;
+  $("#dlgOk").textContent = okText;
+  dlg.returnValue = "";
+  dlg.showModal();
+  const first = $("#dlgBody").querySelector("input[type=text], input[type=number], select");
+  if (first) { first.focus(); first.select && first.select(); }
+  return new Promise((res) => {
+    dlg.onclose = () => res(dlg.returnValue === "ok" ? $("#dlgBody") : null);
+  });
+}
+
+function pickFiles(accept, multiple = true) {
+  return new Promise((res) => {
+    const i = document.createElement("input");
+    i.type = "file";
+    i.accept = accept;
+    i.multiple = multiple;
+    i.onchange = () => res([...i.files]);
+    i.addEventListener("cancel", () => res([]));
+    i.click();
+  });
+}
+
+/** "1-3, 5, 8-" -> [[0,1,2],[4],[7..]] */
+function parseRanges(text, n) {
+  const groups = [];
+  for (let part of text.split(/[,;]/)) {
+    part = part.trim();
+    if (!part) continue;
+    const m = part.match(/^(\d*)\s*-\s*(\d*)$|^(\d+)$/);
+    if (!m) throw new Error(`Непонятный диапазон: «${part}»`);
+    let a, b;
+    if (m[3]) a = b = +m[3];
+    else { a = m[1] ? +m[1] : 1; b = m[2] ? +m[2] : n; }
+    if (a < 1 || b < 1 || a > n || b > n) throw new Error(`Страницы «${part}» нет в документе (всего ${n})`);
+    const g = [];
+    for (let i = a; a <= b ? i <= b : i >= b; i += a <= b ? 1 : -1) g.push(i - 1);
+    groups.push(g);
+  }
+  if (!groups.length) throw new Error("Не указаны страницы");
+  return groups;
+}
+
+/** [0,1,2,4] -> "1-3_5" для имён файлов */
+function fmtPages(p) {
+  const parts = [];
+  for (let i = 0; i < p.length;) {
+    let j = i;
+    while (j + 1 < p.length && p[j + 1] === p[j] + 1) j++;
+    parts.push(i === j ? `${p[i] + 1}` : `${p[i] + 1}-${p[j] + 1}`);
+    i = j + 1;
+  }
+  const s = parts.join("_");
+  return s.length > 40 ? s.slice(0, 40) + "…" : s;
+}
+
+function download(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
+const pdfBlob = (bytes) => new Blob([bytes], { type: "application/pdf" });
+
+/** Сохранить один файл: диалог «Сохранить как» в Chrome/Edge, иначе скачивание. */
+async function saveFile(blob, name, types = PDF_TYPES) {
+  if (window.showSaveFilePicker) {
+    let h;
+    try { h = await showSaveFilePicker({ suggestedName: name, types }); }
+    catch (e) { if (e.name === "AbortError") return null; h = null; }
+    if (h) {
+      const w = await h.createWritable();
+      await w.write(blob);
+      await w.close();
+      return h;
+    }
+  }
+  download(blob, name);
+  return null;
+}
+
+/** Цель для нескольких файлов: папка (Chrome/Edge) или скачивания. null — отмена. */
+async function pickOutput() {
+  if (window.showDirectoryPicker) {
+    try {
+      const dir = await showDirectoryPicker({ mode: "readwrite" });
+      return {
+        dir,
+        async write(name, blob) {
+          const fh = await dir.getFileHandle(name, { create: true });
+          const w = await fh.createWritable();
+          await w.write(blob);
+          await w.close();
+        },
+      };
+    } catch (e) {
+      if (e.name === "AbortError") return null;
+    }
+  }
+  return {
+    dir: null,
+    async write(name, blob) {
+      download(blob, name);
+      await new Promise((r) => setTimeout(r, 250));
+    },
+  };
+}
+
+// ---------- загрузка и отрисовка ----------
+
+async function loadPdfjs(bytes) {
+  const task = pdfjsLib.getDocument({ data: bytes.slice(), isEvalSupported: false, password: S.password });
+  task.onPassword = (update, reason) => {
+    const p = prompt(reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD
+      ? "Неверный пароль. Попробуйте ещё раз:" : "Документ защищён паролем. Введите пароль:");
+    if (p === null) task.destroy();
+    else { S.password = p; update(p); }
+  };
+  return task.promise;
+}
+
+async function openBytes(bytes, name, handle = null, modified = false) {
+  setBusy(true, "Открытие…");
+  try {
+    const prevPassword = S.password;
+    S.password = undefined;
+    let pdf;
+    try {
+      pdf = await loadPdfjs(bytes);
+    } catch (e) {
+      S.password = prevPassword;
+      if (!/destroy|password/i.test(e.message || "")) alert("Не удалось открыть файл:\n" + (e.message || e));
+      return false;
+    }
+    let readOnly = false;
+    try {
+      await PDFDocument.load(bytes, { updateMetadata: false });
+    } catch (e) {
+      readOnly = true;
+      alert(/encrypt/i.test(e.message || "")
+        ? "Документ зашифрован: доступны просмотр и сохранение страниц в JPG / PNG, но не правка."
+        : "Этот PDF не удаётся разобрать для правки. Доступны просмотр и экспорт в JPG / PNG.\n" + e.message);
+    }
+    if (S.pdf) S.pdf.destroy();
+    Object.assign(S, {
+      bytes, pdf, name, handle, modified, readOnly, undo: [], redo: [], cur: 0,
+      sel: new Set([0]), anchor: 0, fit: true,
+    });
+    $("#start").hidden = true;
+    wrap.hidden = false;
+    await buildThumbs();
+    await renderPage();
+    viewer.scrollTop = 0;
+    return true;
+  } finally {
+    setBusy(false);
+    updateUI();
+  }
+}
+
+/** Перечитать S.bytes после изменения. */
+async function reload(full = true) {
+  const old = S.pdf;
+  S.pdf = await loadPdfjs(S.bytes);
+  if (old) old.destroy();
+  S.cur = Math.max(0, Math.min(S.cur, count() - 1));
+  if (full) await buildThumbs();
+  else await renderThumb(S.cur);
+  await renderPage();
+  updateUI();
+}
+
+const thumbObserver = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (e.isIntersecting && !e.target.dataset.done) renderThumb(+e.target.dataset.i);
+  }
+}, { root: thumbsEl, rootMargin: "300px" });
+
+async function buildThumbs() {
+  thumbObserver.disconnect();
+  thumbsEl.innerHTML = "";
+  for (let i = 0; i < count(); i++) {
+    const page = await S.pdf.getPage(i + 1);
+    const vp = page.getViewport({ scale: 1 });
+    const d = document.createElement("div");
+    d.className = "thumb";
+    d.dataset.i = i;
+    d.draggable = true;
+    const c = document.createElement("canvas");
+    c.style.aspectRatio = `${vp.width} / ${vp.height}`;
+    const n = document.createElement("span");
+    n.textContent = i + 1;
+    d.append(c, n);
+    thumbsEl.append(d);
+    thumbObserver.observe(d);
+  }
+  markThumbs();
+}
+
+async function renderThumb(i) {
+  const d = thumbsEl.children[i];
+  if (!d || !S.pdf) return;
+  d.dataset.done = "1";
+  const pdf = S.pdf;
+  const page = await pdf.getPage(i + 1);
+  const dpr = window.devicePixelRatio || 1;
+  const vp = page.getViewport({ scale: (THUMB_W * dpr) / page.getViewport({ scale: 1 }).width });
+  const tmp = document.createElement("canvas");
+  tmp.width = Math.ceil(vp.width);
+  tmp.height = Math.ceil(vp.height);
+  try {
+    await page.render({ canvasContext: tmp.getContext("2d"), viewport: vp }).promise;
+  } catch { return; }
+  if (pdf !== S.pdf) return;
+  const c = d.querySelector("canvas");
+  c.width = tmp.width;
+  c.height = tmp.height;
+  c.getContext("2d").drawImage(tmp, 0, 0);
+}
+
+function markThumbs() {
+  [...thumbsEl.children].forEach((d, i) => {
+    d.classList.toggle("sel", S.sel.has(i));
+    d.classList.toggle("cur", i === S.cur);
+  });
+}
+
+async function renderPage() {
+  if (!S.pdf) return;
+  const token = ++S.renderToken;
+  const page = await S.pdf.getPage(S.cur + 1);
+  const base = page.getViewport({ scale: 96 / 72 });
+  if (S.fit) S.zoom = Math.max(0.1, (viewer.clientWidth - 40) / base.width);
+  const scale = (S.zoom * 96) / 72;
+  const dpr = window.devicePixelRatio || 1;
+  const vp = page.getViewport({ scale });
+  const tmp = document.createElement("canvas");
+  tmp.width = Math.floor(vp.width * dpr);
+  tmp.height = Math.floor(vp.height * dpr);
+  try {
+    await page.render({ canvasContext: tmp.getContext("2d"), viewport: page.getViewport({ scale: scale * dpr }) }).promise;
+  } catch { return; }
+  if (token !== S.renderToken) return;
+  for (const c of [pageCanvas, overlay]) {
+    c.width = tmp.width;
+    c.height = tmp.height;
+    c.style.width = vp.width + "px";
+    c.style.height = vp.height + "px";
+  }
+  pageCanvas.getContext("2d").drawImage(tmp, 0, 0);
+  wrap.style.width = vp.width + "px";
+  wrap.style.height = vp.height + "px";
+  S.vp = vp;
+  S.rotation = norm(page.rotate);
+  updateUI();
+}
+
+function updateUI() {
+  const has = !!S.pdf;
+  const edit = has && !S.readOnly;
+  const n = count();
+  for (const id of ["bSaveAs", "bExport", "bPrev", "bNext", "bZoomIn", "bZoomOut", "bFit"]) $("#" + id).disabled = !has;
+  for (const id of ["bSave", "bBlank", "bSplit", "bExtract", "bRotL", "bRotR", "bUp", "bDown", "bDelete"]) $("#" + id).disabled = !edit;
+  $("#bSave").disabled = !edit;
+  $("#bUndo").disabled = !S.undo.length;
+  $("#bRedo").disabled = !S.redo.length;
+  $("#bInsert").disabled = has && S.readOnly;
+  for (const b of document.querySelectorAll("#tools [data-tool]")) b.disabled = !edit && b.dataset.tool !== "pointer";
+  $("#name").innerHTML = has
+    ? (S.modified ? '<span class="dirty">● </span>' : "") + esc(S.name) + (S.readOnly ? " (только просмотр)" : "")
+    : "";
+  document.title = has ? `${S.modified ? "• " : ""}${S.name} — Редактор PDF` : "Редактор PDF";
+  $("#pageInfo").textContent = has ? `Стр. ${S.cur + 1} из ${n}` : "";
+  $("#zoomInfo").textContent = has ? `${Math.round(S.zoom * 100)}%` : "";
+}
+
+function go(i, keepSel = false) {
+  if (!S.pdf || i < 0 || i >= count()) return Promise.resolve();
+  S.cur = i;
+  if (!keepSel) { S.sel = new Set([i]); S.anchor = i; }
+  markThumbs();
+  const d = thumbsEl.children[i];
+  if (d) d.scrollIntoView({ block: "nearest" });
+  closeTextBox(true);
+  return renderPage();
+}
+
+function setZoom(z) {
+  S.fit = false;
+  S.zoom = Math.max(0.1, Math.min(z, 8));
+  renderPage();
+}
+
+// ---------- изменение документа ----------
+
+/** fn(doc) правит документ pdf-lib; может вернуть новый номер текущей страницы или false для отмены. */
+async function modify(fn, { full = true, text = "Обработка…" } = {}) {
+  if (!S.bytes || S.readOnly) return false;
+  setBusy(true, text);
+  try {
+    const doc = await PDFDocument.load(S.bytes, { updateMetadata: false });
+    const res = await fn(doc);
+    if (res === false) return false;
+    const out = await doc.save();
+    S.undo.push({ bytes: S.bytes, cur: S.cur });
+    if (S.undo.length > UNDO_LIMIT) S.undo.shift();
+    S.redo = [];
+    S.bytes = out;
+    S.modified = true;
+    if (typeof res === "number") S.cur = res;
+    await reload(full);
+    return true;
+  } catch (e) {
+    console.error(e);
+    alert("Ошибка: " + (e.message || e));
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+const modifyPage = (fn) => modify((doc) => fn(doc, doc.getPage(S.cur)), { full: false });
+
+async function history(from, to) {
+  if (!from.length) return;
+  to.push({ bytes: S.bytes, cur: S.cur });
+  const s = from.pop();
+  S.bytes = s.bytes;
+  S.cur = s.cur;
+  S.sel = new Set([S.cur]);
+  S.modified = true;
+  await reload(true);
+}
+
+function selectedPages() {
+  const s = [...S.sel].filter((i) => i < count()).sort((a, b) => a - b);
+  return s.length ? s : [S.cur];
+}
+
+function reselect(rows) {
+  S.sel = new Set(rows);
+  markThumbs();
+}
+
+async function rotate(delta) {
+  const sel = selectedPages();
+  await modify((doc) => {
+    for (const i of sel) {
+      const p = doc.getPage(i);
+      p.setRotation(degrees(norm(p.getRotation().angle + delta)));
+    }
+  });
+  reselect(sel);
+}
+
+async function deletePages() {
+  const sel = selectedPages();
+  if (sel.length >= count()) return alert("Нельзя удалить все страницы документа.");
+  if (sel.length > 1 && !confirm(`Удалить страниц: ${sel.length}?`)) return;
+  await modify((doc) => {
+    for (const i of [...sel].reverse()) doc.removePage(i);
+    return Math.min(sel[0], doc.getPageCount() - 1);
+  });
+  reselect([S.cur]);
+}
+
+/** order — новый порядок страниц (старые индексы). */
+async function applyOrder(order, sel) {
+  if (order.every((v, i) => v === i)) return;
+  const cur = order.indexOf(S.cur);
+  await modify((doc) => {
+    const pages = doc.getPages();
+    for (let i = pages.length - 1; i >= 0; i--) doc.removePage(i);
+    for (const i of order) doc.addPage(pages[i]);
+    return cur;
+  });
+  reselect(sel.map((i) => order.indexOf(i)));
+}
+
+function movePages(d) {
+  const sel = selectedPages();
+  const n = count();
+  if ((d < 0 && sel[0] === 0) || (d > 0 && sel[sel.length - 1] === n - 1)) return;
+  const order = [...Array(n).keys()];
+  for (const i of d < 0 ? sel : [...sel].reverse()) [order[i], order[i + d]] = [order[i + d], order[i]];
+  applyOrder(order, sel);
+}
+
+async function embedImage(doc, file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const isPng = file.type === "image/png" || /\.png$/i.test(file.name);
+  if (isPng) {
+    try { return await doc.embedPng(buf); } catch { /* перекодируем ниже */ }
+  }
+  // JPG и прочее — через canvas (учитывает поворот снимка с телефона)
+  const bmp = await createImageBitmap(new Blob([buf], { type: file.type }));
+  const c = document.createElement("canvas");
+  c.width = bmp.width;
+  c.height = bmp.height;
+  c.getContext("2d").drawImage(bmp, 0, 0);
+  const jpg = !isPng && /jpe?g/i.test(file.type + file.name);
+  const blob = await new Promise((r) => c.toBlob(r, jpg ? "image/jpeg" : "image/png", 0.92));
+  const out = new Uint8Array(await blob.arrayBuffer());
+  return jpg ? doc.embedJpg(out) : doc.embedPng(out);
+}
+
+/** Вставить файлы (PDF и картинки) в doc начиная с позиции pos. Возвращает число страниц. */
+async function insertFilesInto(doc, files, pos) {
+  let added = 0;
+  for (const f of files) {
+    if (IMG_RE.test(f.name) || f.type.startsWith("image/")) {
+      const img = await embedImage(doc, f);
+      const k = Math.min(0.75, 842 / Math.max(img.width, img.height));
+      const w = img.width * k, h = img.height * k;
+      doc.insertPage(pos + added, [w, h]).drawImage(img, { x: 0, y: 0, width: w, height: h });
+      added++;
+    } else {
+      let src;
+      try {
+        src = await PDFDocument.load(new Uint8Array(await f.arrayBuffer()), { updateMetadata: false });
+      } catch (e) {
+        alert(`Пропущен «${f.name}»: ` + (/encrypt/i.test(e.message || "") ? "файл зашифрован" : e.message));
+        continue;
+      }
+      const pages = await doc.copyPages(src, src.getPageIndices());
+      for (const p of pages) doc.insertPage(pos + added++, p);
+    }
+  }
+  return added;
+}
+
+async function buildFromFiles(files) {
+  setBusy(true, "Сборка документа…");
+  let bytes;
+  try {
+    const doc = await PDFDocument.create();
+    if (!(await insertFilesInto(doc, files, 0))) return;
+    bytes = await doc.save();
+  } catch (e) {
+    alert("Ошибка: " + (e.message || e));
+    return;
+  } finally {
+    setBusy(false);
+  }
+  const name = files.length === 1 ? files[0].name.replace(/\.[^.]+$/, "") + ".pdf" : "документ.pdf";
+  await openBytes(bytes, name, null, true);
+}
+
+async function insertFiles(files, pos) {
+  if (!files.length) return;
+  if (!S.pdf) return buildFromFiles(files);
+  let added = 0;
+  await modify(async (doc) => {
+    added = await insertFilesInto(doc, files, pos);
+    return added ? pos : false;
+  }, { text: "Добавление страниц…" });
+  if (added) { reselect([...Array(added).keys()].map((i) => pos + i)); status(`Добавлено страниц: ${added}`); }
+}
+
+async function insertDialog() {
+  const files = await pickFiles(OPEN_ACCEPT);
+  if (!files.length) return;
+  if (!S.pdf) return buildFromFiles(files);
+  const body = await dialog("Куда вставить", `
+    <div class="row"><span>Файлы:</span>${esc(files.map((f) => f.name).join(", "))}</div>
+    <div class="row"><span>Позиция:</span><select name="pos">
+      <option value="end">В конец документа</option>
+      <option value="after">После текущей страницы (${S.cur + 1})</option>
+      <option value="before">Перед текущей страницей</option>
+      <option value="start">В начало документа</option>
+    </select></div>`, "Вставить");
+  if (!body) return;
+  const pos = { end: count(), after: S.cur + 1, before: S.cur, start: 0 }[body.querySelector("[name=pos]").value];
+  await insertFiles(files, pos);
+}
+
+async function insertBlank() {
+  await modify((doc) => {
+    const p = doc.getPage(S.cur);
+    const { width, height } = p.getSize();
+    const np = doc.insertPage(S.cur + 1, [width, height]);
+    np.setRotation(p.getRotation());
+    return S.cur + 1;
+  });
+  reselect([S.cur]);
+}
+
+async function pagesToPdf(doc, idx) {
+  const out = await PDFDocument.create();
+  const pages = await out.copyPages(doc, idx);
+  pages.forEach((p) => out.addPage(p));
+  return out.save();
+}
+
+async function extract() {
+  const sel = selectedPages();
+  setBusy(true);
+  try {
+    const doc = await PDFDocument.load(S.bytes, { updateMetadata: false });
+    const bytes = await pagesToPdf(doc, sel);
+    setBusy(false);
+    await saveFile(pdfBlob(bytes), `${stem()}_стр_${fmtPages(sel)}.pdf`);
+    status(`Сохранено страниц: ${sel.length}`);
+  } catch (e) {
+    alert("Ошибка: " + (e.message || e));
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function split() {
+  const n = count();
+  const body = await dialog("Разделить документ", `
+    <div class="row"><label><input type="radio" name="mode" value="each" checked> Каждая страница — отдельный файл</label></div>
+    <div class="row"><label><input type="radio" name="mode" value="n"> По</label>
+      <input type="number" name="n" min="1" max="${n}" value="${Math.min(2, n)}"> стр. в файле</div>
+    <div class="row"><label><input type="radio" name="mode" value="ranges"> По диапазонам:</label>
+      <input type="text" name="ranges" placeholder="1-3, 4-10, 11-"></div>
+    <div class="note">Всего страниц: ${n}. Каждый диапазон станет отдельным файлом.</div>
+    <div class="note">${window.showDirectoryPicker ? "Дальше выберите папку для файлов." : "Файлы будут скачаны — браузер может спросить разрешение на несколько загрузок."}</div>`,
+  "Разделить");
+  if (!body) return;
+  const f = (k) => body.querySelector(`[name=${k}]`);
+  const mode = body.querySelector("[name=mode]:checked").value;
+  let groups;
+  try {
+    if (mode === "each") groups = [...Array(n).keys()].map((i) => [i]);
+    else if (mode === "n") {
+      const k = Math.max(1, +f("n").value || 1);
+      groups = [];
+      for (let i = 0; i < n; i += k) groups.push([...Array(Math.min(k, n - i)).keys()].map((j) => i + j));
+    } else groups = parseRanges(f("ranges").value, n);
+  } catch (e) {
+    return alert(e.message);
+  }
+  const out = await pickOutput();
+  if (!out) return;
+  setBusy(true, "Разделение…");
+  try {
+    const doc = await PDFDocument.load(S.bytes, { updateMetadata: false });
+    for (const [k, g] of groups.entries()) {
+      $("#busyText").textContent = `Файл ${k + 1} из ${groups.length}…`;
+      await out.write(`${stem()}_стр_${fmtPages(g)}.pdf`, pdfBlob(await pagesToPdf(doc, g)));
+    }
+    status(`Создано файлов: ${groups.length}` + (out.dir ? ` в папке «${out.dir.name}»` : ""), 8000);
+  } catch (e) {
+    alert("Ошибка: " + (e.message || e));
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function exportImages() {
+  const n = count();
+  const hasSel = S.sel.size > 1;
+  const body = await dialog("Сохранить в JPG / PNG", `
+    <div class="row"><span>Формат:</span><select name="fmt"><option>JPG</option><option>PNG</option></select></div>
+    <div class="row"><span>Разрешение:</span><input type="number" name="dpi" min="36" max="600" value="150"> dpi
+      <span class="note">72 — экран, 150 — обычно, 300 — печать</span></div>
+    <div class="row"><span>Качество JPG:</span><input type="number" name="q" min="10" max="100" value="90"> %</div>
+    <div class="row"><span>Страницы:</span>
+      <label><input type="radio" name="pages" value="all" ${hasSel ? "" : "checked"}> все (${n})</label>
+      <label><input type="radio" name="pages" value="sel" ${hasSel ? "checked" : ""}> выделенные (${selectedPages().length})</label></div>
+    <div class="row"><span></span><label><input type="radio" name="pages" value="range"> диапазон:</label>
+      <input type="text" name="range" placeholder="1-3, 5, 8-"></div>
+    <div class="note">${window.showDirectoryPicker ? "Дальше выберите папку для изображений." : "Файлы будут скачаны — браузер может спросить разрешение на несколько загрузок."}</div>`,
+  "Сохранить");
+  if (!body) return;
+  const f = (k) => body.querySelector(`[name=${k}]`);
+  const png = f("fmt").value === "PNG";
+  const dpi = Math.max(36, Math.min(600, +f("dpi").value || 150));
+  const q = Math.max(10, Math.min(100, +f("q").value || 90)) / 100;
+  const mode = body.querySelector("[name=pages]:checked").value;
+  let pages;
+  try {
+    pages = mode === "all" ? [...Array(n).keys()]
+      : mode === "sel" ? selectedPages()
+      : parseRanges(f("range").value, n).flat();
+  } catch (e) {
+    return alert(e.message);
+  }
+  const out = await pickOutput();
+  if (!out) return;
+  const width = String(n).length;
+  setBusy(true);
+  try {
+    for (const [k, i] of pages.entries()) {
+      $("#busyText").textContent = `Страница ${k + 1} из ${pages.length}…`;
+      const page = await S.pdf.getPage(i + 1);
+      const vp = page.getViewport({ scale: dpi / 72 });
+      const c = document.createElement("canvas");
+      c.width = Math.floor(vp.width);
+      c.height = Math.floor(vp.height);
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, c.width, c.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      const blob = await new Promise((r) => c.toBlob(r, png ? "image/png" : "image/jpeg", q));
+      if (!blob) throw new Error("Слишком большое изображение — уменьшите разрешение.");
+      await out.write(`${stem()}_${String(i + 1).padStart(width, "0")}.${png ? "png" : "jpg"}`, blob);
+      c.width = c.height = 0;
+    }
+    status(`Сохранено изображений: ${pages.length}` + (out.dir ? ` в папке «${out.dir.name}»` : ""), 8000);
+  } catch (e) {
+    alert("Ошибка: " + (e.message || e));
+  } finally {
+    setBusy(false);
+  }
+}
+
+// ---------- файлы ----------
+
+async function openDialog() {
+  if (S.modified && !confirm("Есть несохранённые изменения. Открыть другой файл?")) return;
+  if (window.showOpenFilePicker) {
+    let handles;
+    try {
+      handles = await showOpenFilePicker({
+        multiple: true,
+        types: [{ description: "PDF и изображения", accept: { "application/pdf": [".pdf"], "image/*": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"] } }],
+      });
+    } catch (e) {
+      if (e.name === "AbortError") return;
+    }
+    if (handles) {
+      const files = await Promise.all(handles.map((h) => h.getFile()));
+      if (files.length === 1 && !IMG_RE.test(files[0].name)) {
+        return openBytes(new Uint8Array(await files[0].arrayBuffer()), files[0].name, handles[0]);
+      }
+      return buildFromFiles(files);
+    }
+  }
+  const files = await pickFiles(OPEN_ACCEPT);
+  openFiles(files);
+}
+
+async function openFiles(files) {
+  if (!files.length) return;
+  if (files.length === 1 && !IMG_RE.test(files[0].name) && !files[0].type.startsWith("image/")) {
+    return openBytes(new Uint8Array(await files[0].arrayBuffer()), files[0].name);
+  }
+  return buildFromFiles(files);
+}
+
+async function save() {
+  if (!S.bytes || S.readOnly) return;
+  if (!S.handle) return saveAs();
+  try {
+    const w = await S.handle.createWritable();
+    await w.write(pdfBlob(S.bytes));
+    await w.close();
+    S.modified = false;
+    updateUI();
+    status("Сохранено");
+  } catch (e) {
+    if (e.name !== "AbortError") return saveAs();
+  }
+}
+
+async function saveAs() {
+  if (!S.bytes) return;
+  const name = S.name.toLowerCase().endsWith(".pdf") ? S.name : stem() + ".pdf";
+  try {
+    const h = await saveFile(pdfBlob(S.bytes), name);
+    if (h) { S.handle = h; S.name = h.name; }
+    S.modified = false;
+    updateUI();
+    status("Сохранено");
+  } catch (e) {
+    alert("Не удалось сохранить: " + (e.message || e));
+  }
+}
+
+// ---------- инструменты правки ----------
+
+function setTool(t) {
+  closeTextBox(true);
+  S.tool = t;
+  for (const b of document.querySelectorAll("#tools [data-tool]")) b.classList.toggle("active", b.dataset.tool === t);
+  wrap.className = "t-" + t;
+  status(document.querySelector(`#tools [data-tool=${t}]`).title, 5000);
+}
+
+function toPdf(p) {
+  const [x, y] = S.vp.convertToPdfPoint(p.x, p.y);
+  return { x, y };
+}
+
+function rectToPdf(a, b) {
+  const p = toPdf(a), q = toPdf(b);
+  return { x: Math.min(p.x, q.x), y: Math.min(p.y, q.y), w: Math.abs(p.x - q.x), h: Math.abs(p.y - q.y) };
+}
+
+/** Точка в повёрнутой системе: начало o, угол ang (рад), смещение (du, dv). */
+function along(o, ang, du, dv) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return { x: o.x + du * c - dv * s, y: o.y + du * s + dv * c };
+}
+
+const octx = () => {
+  const ctx = overlay.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  return ctx;
+};
+
+let drag = null;
+function pos(e) {
+  const r = overlay.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+overlay.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0 || !S.vp || S.readOnly) return;
+  const p = pos(e);
+  if (textBox) { closeTextBox(false); return; }
+  if (S.tool === "text") { e.preventDefault(); openTextBox(p); return; }
+  if (S.tool === "edit") { editTextAt(p); return; }
+  if (["erase", "highlight", "box", "image", "ink"].includes(S.tool)) {
+    overlay.setPointerCapture(e.pointerId);
+    drag = { start: p, cur: p, pts: [p] };
+  }
+});
+
+overlay.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const p = pos(e);
+  drag.cur = p;
+  const ctx = octx();
+  if (S.tool === "ink") {
+    const last = drag.pts[drag.pts.length - 1];
+    if (Math.hypot(p.x - last.x, p.y - last.y) > 1.5) drag.pts.push(p);
+    ctx.strokeStyle = color();
+    ctx.lineWidth = Math.max(1, lineWidth() * S.vp.scale);
+    ctx.lineCap = ctx.lineJoin = "round";
+    ctx.beginPath();
+    drag.pts.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+    ctx.stroke();
+  } else {
+    ctx.strokeStyle = "#0078d7";
+    ctx.setLineDash([4, 3]);
+    ctx.fillStyle = "rgba(0,120,215,.15)";
+    const x = Math.min(drag.start.x, p.x), y = Math.min(drag.start.y, p.y);
+    ctx.fillRect(x, y, Math.abs(p.x - drag.start.x), Math.abs(p.y - drag.start.y));
+    ctx.strokeRect(x, y, Math.abs(p.x - drag.start.x), Math.abs(p.y - drag.start.y));
+  }
+});
+
+overlay.addEventListener("pointerup", async (e) => {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  d.cur = pos(e);
+  octx();
+  if (S.tool === "ink") {
+    d.pts.push(d.cur);
+    if (d.pts.length > 1) await addInk(d.pts);
+  } else if (Math.abs(d.cur.x - d.start.x) > 3 && Math.abs(d.cur.y - d.start.y) > 3) {
+    await applyRect(d.start, d.cur);
+  }
+});
+
+async function applyRect(a, b) {
+  const r = rectToPdf(a, b);
+  const rot = S.rotation;
+  if (S.tool === "image") {
+    const [file] = await pickFiles("image/*", false);
+    if (!file) return;
+    await modifyPage(async (doc, page) => {
+      const img = await embedImage(doc, file);
+      // изображение ставим «прямо» относительно повёрнутой страницы и вписываем в рамку
+      const swap = rot % 180 !== 0;
+      const W = swap ? r.h : r.w, H = swap ? r.w : r.h;
+      const k = Math.min(W / img.width, H / img.height);
+      const iw = img.width * k, ih = img.height * k;
+      const origin = {
+        0: { x: r.x, y: r.y }, 90: { x: r.x + r.w, y: r.y },
+        180: { x: r.x + r.w, y: r.y + r.h }, 270: { x: r.x, y: r.y + r.h },
+      }[rot];
+      const o = along(origin, (rot * Math.PI) / 180, (W - iw) / 2, (H - ih) / 2);
+      page.drawImage(img, { x: o.x, y: o.y, width: iw, height: ih, rotate: degrees(rot) });
+    });
+  } else if (S.tool === "erase") {
+    await modifyPage((doc, page) => {
+      page.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, color: rgb(1, 1, 1) });
+    });
+  } else if (S.tool === "highlight") {
+    const c = color() === "#000000" ? rgb(1, 0.9, 0) : hexRgb(color());
+    await modifyPage((doc, page) => {
+      page.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, color: c, opacity: 0.4, blendMode: BlendMode.Multiply });
+    });
+  } else if (S.tool === "box") {
+    await modifyPage((doc, page) => {
+      page.drawRectangle({ x: r.x, y: r.y, width: r.w, height: r.h, borderColor: hexRgb(color()), borderWidth: lineWidth() });
+    });
+  }
+}
+
+async function addInk(pts) {
+  const pp = pts.map(toPdf);
+  const c = hexRgb(color()), w = lineWidth();
+  await modifyPage((doc, page) => {
+    for (let i = 1; i < pp.length; i++) {
+      page.drawLine({ start: pp[i - 1], end: pp[i], thickness: w, color: c, lineCap: LineCapStyle.Round });
+    }
+  });
+}
+
+let textBox = null;
+function openTextBox(p) {
+  const ta = document.createElement("textarea");
+  ta.className = "textbox";
+  const px = fontSize() * S.vp.scale;
+  Object.assign(ta.style, { left: p.x + "px", top: p.y + "px", fontSize: px + "px", color: color() });
+  ta.rows = 1;
+  ta.placeholder = "Текст…";
+  wrap.append(ta);
+  textBox = { ta, p, px };
+  const grow = () => {
+    ta.style.height = "auto";
+    ta.style.height = ta.scrollHeight + "px";
+    ta.style.width = "auto";
+    ta.style.width = Math.max(120, ta.scrollWidth + 4) + "px";
+  };
+  ta.addEventListener("input", grow);
+  ta.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") closeTextBox(true);
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) closeTextBox(false);
+  });
+  ta.focus();
+  setTimeout(() => ta.focus(), 0);
+}
+
+async function closeTextBox(cancel) {
+  if (!textBox) return;
+  const { ta, p, px } = textBox;
+  textBox = null;
+  const text = ta.value.replace(/\t/g, "    ").replace(/\r/g, "");
+  ta.remove();
+  if (cancel || !text.trim()) return;
+  const size = fontSize();
+  // базовая линия первой строки (line-height 1.2, восходящая часть шрифта ~0.9)
+  const base = toPdf({ x: p.x, y: p.y + px * 1.0 });
+  const c = hexRgb(color());
+  await modifyPage(async (doc, page) => {
+    const font = await embedFont(doc);
+    page.drawText(text, { x: base.x, y: base.y, size, font, color: c, lineHeight: size * 1.2, rotate: degrees(S.rotation) });
+  });
+}
+
+async function editTextAt(p) {
+  const page = await S.pdf.getPage(S.cur + 1);
+  const tc = await page.getTextContent();
+  const pt = toPdf(p);
+  const items = tc.items.filter((it) => it.str !== undefined && it.str.length).map((it) => {
+    const [a, b, c, d, e, f] = it.transform;
+    return { str: it.str, w: it.width, size: Math.hypot(c, d) || Math.hypot(a, b), ang: Math.atan2(b, a), o: { x: e, y: f } };
+  });
+  const local = (it, q) => {
+    const dx = q.x - it.o.x, dy = q.y - it.o.y, c = Math.cos(it.ang), s = Math.sin(it.ang);
+    return { u: dx * c + dy * s, v: -dx * s + dy * c };
+  };
+  const hit = items.find((it) => {
+    const l = local(it, pt);
+    return l.u >= -1 && l.u <= it.w + 1 && l.v >= -0.3 * it.size && l.v <= it.size && it.str.trim();
+  });
+  if (!hit) {
+    status("Здесь нет текста. В отсканированных страницах используйте «Стереть» и «Текст».", 6000);
+    return;
+  }
+  // собрать всю строку: элементы на той же базовой линии рядом друг с другом
+  const line = items.filter((it) => Math.abs(it.ang - hit.ang) < 0.01)
+    .map((it) => ({ it, ...local(hit, it.o) }))
+    .filter((x) => Math.abs(x.v) < hit.size * 0.3)
+    .sort((a, b) => a.u - b.u);
+  let i0 = line.findIndex((x) => x.it === hit), i1 = i0;
+  const gap = (a, b) => b.u - (a.u + a.it.w);
+  while (i0 > 0 && gap(line[i0 - 1], line[i0]) < hit.size * 1.5) i0--;
+  while (i1 < line.length - 1 && gap(line[i1], line[i1 + 1]) < hit.size * 1.5) i1++;
+  const parts = line.slice(i0, i1 + 1);
+  let old = "";
+  parts.forEach((x, k) => {
+    if (k && gap(parts[k - 1], x) > hit.size * 0.15 && !/\s$/.test(old) && !/^\s/.test(x.it.str)) old += " ";
+    old += x.it.str;
+  });
+  const u0 = parts[0].u, u1 = Math.max(...parts.map((x) => x.u + x.it.w));
+  const body = await dialog("Править текст", `
+    <div class="row"><input type="text" name="t" value="${esc(old)}" style="min-width:min(520px,80vw)"></div>
+    <div class="note">Старая строка будет закрыта белым, новая написана поверх (шрифт Liberation Sans, цвет — с панели).</div>`,
+  "Заменить");
+  if (!body) return;
+  const text = body.querySelector("[name=t]").value;
+  if (text === old) return;
+  const size = Math.round(hit.size * 10) / 10;
+  const origin = along(hit.o, hit.ang, u0, 0);
+  const cover = along(origin, hit.ang, -1, -0.25 * size);
+  const deg = (hit.ang * 180) / Math.PI;
+  const c = hexRgb(color());
+  await modifyPage(async (doc, pg) => {
+    pg.drawRectangle({ x: cover.x, y: cover.y, width: u1 - u0 + 2, height: size * 1.22, color: rgb(1, 1, 1), rotate: degrees(deg) });
+    if (text.trim()) {
+      const font = await embedFont(doc);
+      pg.drawText(text, { x: origin.x, y: origin.y, size, font, color: c, rotate: degrees(deg) });
+    }
+  });
+}
+
+// ---------- миниатюры: выбор и перетаскивание ----------
+
+thumbsEl.addEventListener("click", (e) => {
+  const d = e.target.closest(".thumb");
+  if (!d) return;
+  const i = +d.dataset.i;
+  if (e.shiftKey) {
+    const [a, b] = [Math.min(S.anchor, i), Math.max(S.anchor, i)];
+    S.sel = new Set([...Array(b - a + 1).keys()].map((k) => a + k));
+  } else if (e.ctrlKey || e.metaKey) {
+    S.sel.has(i) && S.sel.size > 1 ? S.sel.delete(i) : S.sel.add(i);
+    S.anchor = i;
+  } else {
+    S.sel = new Set([i]);
+    S.anchor = i;
+  }
+  go(i, true);
+});
+
+function dropIndex(e) {
+  const kids = [...thumbsEl.children];
+  for (const [i, d] of kids.entries()) {
+    const r = d.getBoundingClientRect();
+    if (e.clientY < r.top + r.height / 2) return i;
+  }
+  return kids.length;
+}
+
+function clearDropMarks() {
+  for (const d of thumbsEl.querySelectorAll(".drop-before, .drop-after")) d.classList.remove("drop-before", "drop-after");
+}
+
+thumbsEl.addEventListener("dragstart", (e) => {
+  const d = e.target.closest(".thumb");
+  if (!d || S.readOnly) return e.preventDefault();
+  const i = +d.dataset.i;
+  if (!S.sel.has(i)) { S.sel = new Set([i]); markThumbs(); }
+  S.dragPages = selectedPages();
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", "pages");
+});
+
+thumbsEl.addEventListener("dragend", () => { S.dragPages = null; clearDropMarks(); });
+
+thumbsEl.addEventListener("dragover", (e) => {
+  const files = e.dataTransfer.types.includes("Files");
+  if (!S.dragPages && !(files && S.pdf)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.dataTransfer.dropEffect = files ? "copy" : "move";
+  clearDropMarks();
+  const k = dropIndex(e), kids = thumbsEl.children;
+  if (k < kids.length) kids[k].classList.add("drop-before");
+  else if (kids.length) kids[kids.length - 1].classList.add("drop-after");
+});
+
+thumbsEl.addEventListener("dragleave", (e) => { if (!thumbsEl.contains(e.relatedTarget)) clearDropMarks(); });
+
+thumbsEl.addEventListener("drop", (e) => {
+  const k = dropIndex(e);
+  clearDropMarks();
+  if (S.dragPages) {
+    e.preventDefault();
+    e.stopPropagation();
+    const moving = S.dragPages;
+    S.dragPages = null;
+    const rest = [...Array(count()).keys()].filter((i) => !moving.includes(i));
+    const at = rest.filter((i) => i < k).length;
+    applyOrder([...rest.slice(0, at), ...moving, ...rest.slice(at)], moving);
+  } else if (e.dataTransfer.files.length && S.pdf && !S.readOnly) {
+    e.preventDefault();
+    e.stopPropagation();
+    insertFiles([...e.dataTransfer.files], k);
+  }
+});
+
+// ---------- перетаскивание файлов в окно ----------
+
+document.addEventListener("dragover", (e) => {
+  if (!e.dataTransfer.types.includes("Files")) return;
+  e.preventDefault();
+  viewer.classList.add("drop");
+});
+document.addEventListener("dragleave", (e) => { if (!e.relatedTarget) viewer.classList.remove("drop"); });
+document.addEventListener("drop", async (e) => {
+  viewer.classList.remove("drop");
+  if (!e.dataTransfer.files.length) return;
+  e.preventDefault();
+  const files = [...e.dataTransfer.files];
+  if (!S.pdf) return openFiles(files);
+  const body = await dialog("Файлы перетащены", `
+    <div class="row">${esc(files.map((f) => f.name).join(", "))}</div>
+    ${S.readOnly ? "" : '<div class="row"><label><input type="radio" name="act" value="add" checked> Добавить в конец документа</label></div>'}
+    <div class="row"><label><input type="radio" name="act" value="open" ${S.readOnly ? "checked" : ""}> Открыть ${files.length > 1 ? "как новый документ" : "вместо текущего"}</label></div>
+    <div class="note">Чтобы вставить в нужное место — бросьте файлы на панель миниатюр.</div>`);
+  if (!body) return;
+  if (body.querySelector("[name=act]:checked").value === "add") return insertFiles(files, count());
+  if (S.modified && !confirm("Есть несохранённые изменения. Открыть другой файл?")) return;
+  openFiles(files);
+});
+
+// ---------- кнопки и клавиши ----------
+
+const on = (id, fn) => $("#" + id).addEventListener("click", fn);
+on("bOpen", openDialog);
+on("bStart", openDialog);
+on("bSave", save);
+on("bSaveAs", saveAs);
+on("bUndo", () => history(S.undo, S.redo));
+on("bRedo", () => history(S.redo, S.undo));
+on("bInsert", insertDialog);
+on("bBlank", insertBlank);
+on("bSplit", split);
+on("bExtract", extract);
+on("bExport", exportImages);
+on("bRotL", () => rotate(-90));
+on("bRotR", () => rotate(90));
+on("bUp", () => movePages(-1));
+on("bDown", () => movePages(1));
+on("bDelete", deletePages);
+on("bPrev", () => go(S.cur - 1));
+on("bNext", () => go(S.cur + 1));
+on("bZoomIn", () => setZoom(S.zoom * 1.2));
+on("bZoomOut", () => setZoom(S.zoom / 1.2));
+on("bFit", () => { S.fit = true; renderPage(); });
+on("bTheme", () => {
+  const dark = document.documentElement.dataset.theme !== "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  try { localStorage.setItem("pdf-editor-theme", dark ? "dark" : "light"); } catch {}
+});
+for (const b of document.querySelectorAll("#tools [data-tool]")) b.addEventListener("click", () => setTool(b.dataset.tool));
+
+for (const id of ["color", "fontSize", "lineWidth"]) {
+  const el = $("#" + id);
+  try { const v = localStorage.getItem("pdf-editor-" + id); if (v) el.value = v; } catch {}
+  el.addEventListener("change", () => { try { localStorage.setItem("pdf-editor-" + id, el.value); } catch {} });
+}
+
+(() => {
+  let t = null;
+  try { t = localStorage.getItem("pdf-editor-theme"); } catch {}
+  if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.dataset.theme = t;
+})();
+
+document.addEventListener("keydown", (e) => {
+  if ($("#dlg").open) return;
+  const typing = /INPUT|TEXTAREA|SELECT/.test(e.target.tagName);
+  const ctrl = e.ctrlKey || e.metaKey;
+  const k = e.key.toLowerCase();
+  const act = (fn) => { e.preventDefault(); fn(); };
+  if (ctrl && (k === "o" || k === "щ")) return act(openDialog);
+  if (ctrl && (k === "s" || k === "ы")) return act(e.shiftKey ? saveAs : save);
+  if (typing) return;
+  if (ctrl && (k === "z" || k === "я")) return act(() => (e.shiftKey ? history(S.redo, S.undo) : history(S.undo, S.redo)));
+  if (ctrl && (k === "y" || k === "н")) return act(() => history(S.redo, S.undo));
+  if (!S.pdf) return;
+  if (ctrl && (k === "e" || k === "у")) return act(exportImages);
+  if (ctrl && (k === "i" || k === "ш")) return act(insertDialog);
+  if (ctrl && (k === "=" || k === "+")) return act(() => setZoom(S.zoom * 1.2));
+  if (ctrl && k === "-") return act(() => setZoom(S.zoom / 1.2));
+  if (ctrl && k === "0") return act(() => { S.fit = true; renderPage(); });
+  if (ctrl && k === "a" && e.target.closest && thumbsEl.contains(document.activeElement)) return;
+  if (e.key === "PageDown" || (e.key === "ArrowDown" && ctrl)) return act(() => go(S.cur + 1));
+  if (e.key === "PageUp" || (e.key === "ArrowUp" && ctrl)) return act(() => go(S.cur - 1));
+  if (e.key === "Home" && ctrl) return act(() => go(0));
+  if (e.key === "End" && ctrl) return act(() => go(count() - 1));
+  if (e.key === "Delete" && !S.readOnly) return act(deletePages);
+  if (e.key === "Escape") setTool("pointer");
+});
+
+// колёсико: Ctrl — масштаб, у края страницы — листание
+let wheelLock = 0;
+viewer.addEventListener("wheel", (e) => {
+  if (!S.pdf) return;
+  if (e.ctrlKey) {
+    e.preventDefault();
+    setZoom(S.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+    return;
+  }
+  if (Date.now() < wheelLock) return;
+  const atBottom = viewer.scrollTop + viewer.clientHeight >= viewer.scrollHeight - 2;
+  if (e.deltaY > 0 && atBottom && S.cur < count() - 1) {
+    e.preventDefault();
+    wheelLock = Date.now() + 400;
+    go(S.cur + 1).then(() => (viewer.scrollTop = 0));
+  } else if (e.deltaY < 0 && viewer.scrollTop <= 0 && S.cur > 0) {
+    e.preventDefault();
+    wheelLock = Date.now() + 400;
+    go(S.cur - 1).then(() => (viewer.scrollTop = viewer.scrollHeight));
+  }
+}, { passive: false });
+
+let resizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => S.fit && renderPage(), 150);
+});
+
+window.addEventListener("beforeunload", (e) => {
+  if (S.modified) { e.preventDefault(); e.returnValue = ""; }
+});
+
+updateUI();
+</script>
+</body>
+</html>
