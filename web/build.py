@@ -2,6 +2,7 @@
 
 import base64
 import re
+import sys
 from pathlib import Path
 
 WEB = Path(__file__).parent
@@ -13,7 +14,8 @@ def lib_text(name):
     low = text.lower()
     # такие последовательности сломали бы разбор встроенного <script>
     assert "</script" not in low and "<!--" not in low, name
-    return text
+    # литерал U+FFFD в строках JS -> равнозначный escape (иначе файл выглядит «битым»)
+    return text.replace("\ufffd", "\\uFFFD")
 
 
 def main():
@@ -36,6 +38,19 @@ def main():
     assert 'src="lib/' not in html and 'data-src="lib/' not in html
     OUT.write_text(html, encoding="utf-8")
     print(f"{OUT} — {OUT.stat().st_size / 1e6:.1f} МБ")
+    if len(sys.argv) > 2 and sys.argv[1] == "--artifact":
+        write_artifact(html, Path(sys.argv[2]))
+
+
+def write_artifact(html, path):
+    """Вариант для публикации на claude.ai: без html/head/body, заголовок и стили в начале."""
+    head = re.search(r"<head>(.*?)</head>", html, re.S).group(1)
+    body = re.search(r"<body>(.*)</body>", html, re.S).group(1)
+    title = re.search(r"<title>.*?</title>", head, re.S).group(0)
+    style = re.search(r"<style>.*?</style>", head, re.S).group(0)
+    scripts = "".join(re.findall(r"<script.*?</script>", head, re.S))
+    path.write_text(f"{title}\n{style}\n{scripts}\n{body}", encoding="utf-8")
+    print(f"{path} — {path.stat().st_size / 1e6:.1f} МБ")
 
 
 if __name__ == "__main__":
